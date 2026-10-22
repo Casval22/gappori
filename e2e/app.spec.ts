@@ -1,0 +1,233 @@
+import { test, expect, type Page } from '@playwright/test'
+const ready = (page: Page) =>
+  expect(page.getByRole('heading', { name: '探索範囲内のおすすめ' })).toBeVisible()
+const menu = (page: Page, name: string) =>
+  page.getByRole('navigation', { name: 'メインメニュー' }).getByRole('link', { name, exact: true })
+async function noOverflow(page: Page) {
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  )
+}
+test.beforeEach(async ({ page }) => {
+  await page.goto('./')
+})
+test('初回の実計算、4人、8列、画面遷移とサブパス再読み込み', async ({ page }, info) => {
+  const requests: string[] = [],
+    errors: string[] = []
+  page.on('request', (r) => {
+    if (!r.url().startsWith('http://127.0.0.1:4173/') && !r.url().startsWith('blob:'))
+      requests.push(r.url())
+  })
+  page.on('pageerror', (e) => errors.push(e.message))
+  await page.reload()
+  await ready(page)
+  await expect(page.locator('.group-metrics strong').first()).toHaveText(/\d+\.\d{2}%/)
+  await page.screenshot({ path: info.outputPath('play.png'), fullPage: true })
+  await page.getByRole('button', { name: '4人', exact: true }).click()
+  await ready(page)
+  await expect(page.locator('.bet-card')).toHaveCount(4)
+  await page.getByRole('button', { name: '8列 1,1,1,1,2,2,3,4', exact: true }).click()
+  await ready(page)
+  await expect(page.locator('.selected-pattern .stack-column')).toHaveCount(8)
+  await noOverflow(page)
+  await page.screenshot({ path: info.outputPath('four-players.png'), fullPage: true })
+  for (const name of ['型の管理', '設定', '履歴・データ']) {
+    await menu(page, name).click()
+    await page.reload()
+    await noOverflow(page)
+    await page.screenshot({ path: info.outputPath(`${name}.png`), fullPage: true })
+  }
+  await menu(page, 'プレイ').click()
+  await ready(page)
+  expect(page.url()).toContain('/pages-test/#/')
+  expect(requests).toEqual([])
+  expect(errors).toEqual([])
+})
+test('8列追加、無効値と重複を防止、再読み込みで保持', async ({ page }) => {
+  await page.getByRole('button', { name: '＋ 型を追加', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '型を追加' })
+  await dialog.getByLabel('名前（任意）').fill('保存テスト')
+  for (let i = 0; i < 3; i++) await dialog.getByRole('button', { name: /列を追加/ }).click()
+  await expect(dialog.getByRole('button', { name: '追加して選択' })).toBeDisabled()
+  const counts = [1, 1, 1, 2, 2, 2, 3, 3]
+  for (let i = 0; i < 8; i++)
+    await dialog
+      .getByRole('spinbutton', { name: `列${i + 1}の個数`, exact: true })
+      .fill(String(counts[i]))
+  await expect(dialog.getByText('合計 15 / 必要 15 ポケット')).toBeVisible()
+  await dialog.getByRole('spinbutton', { name: '列1の個数', exact: true }).fill('1.5')
+  await expect(dialog.getByRole('button', { name: '追加して選択' })).toBeDisabled()
+  await dialog.getByRole('spinbutton', { name: '列1の個数', exact: true }).fill('1')
+  await dialog.getByRole('button', { name: '追加して選択' }).click()
+  await expect(dialog).not.toBeVisible()
+  await ready(page)
+  await page.reload()
+  await ready(page)
+  await expect(page.getByRole('button', { name: '保存テスト 1,1,1,2,2,2,3,3' })).toBeVisible()
+  await page.getByRole('button', { name: '＋ 型を追加', exact: true }).click()
+  await expect(page.getByText('同じ型が登録済みです。')).toBeVisible()
+  await expect(page.getByRole('button', { name: '追加して選択' })).toBeDisabled()
+  await page.getByRole('button', { name: '既存の型を選択' }).click()
+  await expect(page.getByRole('dialog')).not.toBeVisible()
+})
+test('人数を減らしても個人条件を保持、予算変更で再計算', async ({ page }) => {
+  await page.getByRole('button', { name: '4人', exact: true }).click()
+  await page.getByRole('button', { name: /4 P4 残高/ }).click()
+  const dialog = page.getByRole('dialog', { name: 'P4の条件' })
+  await dialog.getByLabel('残高', { exact: true }).fill('777')
+  await dialog.getByLabel('1回のBET上限').fill('0')
+  page.once('dialog', (d) => d.accept())
+  await dialog.getByRole('button', { name: '条件を保存' }).click()
+  await ready(page)
+  await expect(
+    page.getByText('購入可能な案なし。残高・上限・操作時間を確認してください。'),
+  ).toBeVisible()
+  await page.getByRole('button', { name: '1人', exact: true }).click()
+  await page.getByRole('button', { name: '4人', exact: true }).click()
+  await expect(page.getByRole('button', { name: /4 P4 残高 777枚 \/ 上限 0枚/ })).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('button', { name: /4 P4 残高 777枚 \/ 上限 0枚/ })).toBeVisible()
+})
+test('配当手入力、FC仮説、前半のFC確認、デモの分離', async ({ page }) => {
+  await ready(page)
+  await expect(page.getByText('配当不明 · 収支は計算しません').first()).toBeVisible()
+  await page.getByRole('button', { name: '配当入力', exact: true }).first().click()
+  const dialog = page.getByRole('dialog', { name: '今回の配当を入力' })
+  await dialog.getByLabel('指定数量の総払出枚数').fill('50')
+  await dialog.getByRole('button', { name: '今回確認した配当を保存' }).click()
+  await ready(page)
+  await expect(page.getByText('配当入力済み候補内', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '持続性をシミュレーション' }).click()
+  await expect(page.getByText('推定 · seed 2026')).toBeVisible()
+  await page.getByRole('button', { name: '次のラウンド →' }).click()
+  await ready(page)
+  await expect(page.getByText('配当不明 · 収支は計算しません').first()).toBeVisible()
+  await menu(page, '設定').click()
+  await page.getByLabel('下駄のFC獲得率', { exact: false }).fill('100')
+  await page.getByLabel('舟のFC獲得率', { exact: false }).fill('0')
+  page.once('dialog', (d) => d.accept())
+  await page.getByRole('button', { name: 'ルール設定を保存' }).click()
+  await menu(page, 'プレイ').click()
+  await ready(page)
+  await expect(
+    page.getByText('FC未設定の皿種はFCを除外し、基準確率を表示しています。'),
+  ).not.toBeVisible()
+  await page.getByText('前半3球からFC対象を確認', { exact: true }).first().click()
+  const fc = page
+    .locator('details')
+    .filter({ has: page.locator('summary', { hasText: '前半3球からFC対象を確認' }) })
+    .first()
+  await fc.getByLabel('⑤', { exact: true }).fill('3')
+  await expect(fc.getByText(/FC獲得済み条件/)).toBeVisible()
+  await menu(page, '設定').click()
+  await page.getByRole('button', { name: '架空配当のデモを開始' }).click()
+  await menu(page, 'プレイ').click()
+  await ready(page)
+  await expect(page.locator('.demo-banner')).toContainText('架空配当のデモ')
+  await expect(page.getByRole('button', { name: '実際の結果を記録' })).toBeDisabled()
+  await page.locator('.demo-banner').getByRole('button', { name: '終了', exact: true }).click()
+  await ready(page)
+  await expect(page.getByText('配当不明 · 収支は計算しません').first()).toBeVisible()
+})
+test('結果記録・二重精算防止・取消・再読み込み', async ({ page }) => {
+  await ready(page)
+  await expect(page.getByRole('button', { name: /1 P1 残高 300枚/ })).toBeVisible()
+  await page.getByRole('button', { name: '実際の結果を記録' }).click()
+  const dialog = page.getByRole('dialog', { name: /結果を記録/ })
+  await dialog.getByLabel('P1 実際のBET費用').fill('5')
+  await dialog.getByLabel('P1 通常払出').fill('20')
+  await dialog.getByLabel('P1 追加支出').fill('3')
+  await dialog.getByLabel('P1 追加獲得').fill('4')
+  page.once('dialog', (d) => d.accept())
+  await dialog.getByRole('button', { name: '確認して残高に反映' }).click()
+  await ready(page)
+  await expect(page.getByRole('button', { name: /1 P1 残高 316枚/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'このラウンドは記録済み' })).toBeDisabled()
+  await page.reload()
+  await ready(page)
+  await expect(page.getByRole('button', { name: /1 P1 残高 316枚/ })).toBeVisible()
+  await menu(page, '履歴・データ').click()
+  await expect(page.getByText('P1：300 → 316枚')).toBeVisible()
+  page.once('dialog', (d) => d.accept())
+  await page.getByRole('button', { name: '直前の記録を取消' }).click()
+  await expect(page.getByText('まだプレイ記録はありません')).toBeVisible()
+  await menu(page, 'プレイ').click()
+  await expect(page.getByRole('button', { name: /1 P1 残高 300枚/ })).toBeVisible()
+})
+test('JSONの確認付き復元と不正JSON、破損データの保護', async ({ page }) => {
+  await page.getByRole('button', { name: '2人', exact: true }).click()
+  await ready(page)
+  await menu(page, '履歴・データ').click()
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'JSONをエクスポート' }).click()
+  const download = await downloadPromise,
+    file = await download.path()
+  page.once('dialog', (d) => d.accept())
+  await page.getByText('データの整理・初期化', { exact: true }).click()
+  await page.getByRole('button', { name: '全データを初期化' }).click()
+  await page.getByLabel('JSONから復元（2MB以下）').setInputFiles(file!)
+  await expect(page.getByRole('dialog', { name: 'JSONの復元を確認' })).toContainText('2人')
+  await page.getByRole('button', { name: '確認してデータを置き換える' }).click()
+  await page.reload()
+  await menu(page, 'プレイ').click()
+  await expect(page.getByRole('button', { name: '2人', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  await menu(page, '履歴・データ').click()
+  for (const content of ['{', '{"schemaVersion":99}']) {
+    await page.getByLabel('JSONから復元（2MB以下）').setInputFiles({
+      name: 'bad.json',
+      mimeType: 'application/json',
+      buffer: Buffer.from(content),
+    })
+    await expect(page.getByRole('alert')).toBeVisible()
+  }
+  await page.evaluate(() => localStorage.setItem('gappori-navi:/pages-test/:v1', '{broken'))
+  // Navigate to another origin-free blank document to avoid pagehide replacing the deliberately corrupted fixture.
+  await page.goto('about:blank')
+  await page.goto('./')
+  // Seed corruption before the app runs on the next load.
+  await page.addInitScript(() => localStorage.setItem('gappori-navi:/pages-test/:v1', '{broken'))
+  await page.reload()
+  await expect(page.getByRole('alert')).toContainText('保護')
+  await page.getByRole('button', { name: '4人', exact: true }).click()
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('gappori-navi:/pages-test/:v1')))
+    .toBe('{broken')
+})
+test('ダイアログのキーボード操作、設定不適合の型を保持', async ({ page }) => {
+  const add = page.getByRole('button', { name: '＋ 型を追加', exact: true })
+  await add.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('dialog', { name: '型を追加' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(add).toBeFocused()
+  await menu(page, '設定').click()
+  await page.getByLabel('総ポケット数', { exact: true }).fill('20')
+  page.once('dialog', (d) => d.accept())
+  await page.getByRole('button', { name: 'ルール設定を保存' }).click()
+  await menu(page, '型の管理').click()
+  await expect(page.getByRole('button', { name: '階段 1,2,3,4,5', exact: true })).toBeDisabled()
+  await expect(page.getByText('現在のルールと不一致（16枠・特殊1）')).toHaveCount(4)
+  await page.reload()
+  await expect(page.getByRole('button', { name: '階段 1,2,3,4,5', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: '＋ 型を追加', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: '型を追加' })
+  for (const label of ['⑤', '④', '③', '②'])
+    await editor.getByRole('button', { name: `${label}を削除`, exact: true }).click()
+  await editor.getByRole('spinbutton', { name: '列1の個数', exact: true }).fill('19')
+  await editor.getByRole('button', { name: '追加して選択' }).click()
+  const tower = page.getByRole('button', { name: '型 19', exact: true }).locator('.stack-tower')
+  await expect(tower.locator('.stack-block')).toHaveCount(19)
+  expect(
+    await tower.evaluate((element) => {
+      const bounds = element.getBoundingClientRect()
+      return [...element.children].every((block) => {
+        const b = block.getBoundingClientRect()
+        return b.top >= bounds.top - 0.5 && b.bottom <= bounds.bottom + 0.5
+      })
+    }),
+  ).toBe(true)
+  await noOverflow(page)
+})

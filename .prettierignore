@@ -1,0 +1,10 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+coverage/
+.cache/
+package-lock.json
+AGENTS.md
+codex_prompt_gappori_v1.md
+docs/codex-prompt-v1.md
